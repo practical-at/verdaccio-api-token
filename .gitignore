@@ -1,0 +1,7 @@
+.idea
+package-lock.json
+node_modules
+package
+dist
+index.js
+types

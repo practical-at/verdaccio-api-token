@@ -1,0 +1,32 @@
+{
+  "name": "@practical/verdaccio-api-token",
+  "version": "1.0.0",
+  "description": "Simple API token auth for Verdaccio",
+  "main": "index.js",
+  "verdaccio": {
+    "plugin": true
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "verdaccio",
+    "auth",
+    "api",
+    "token"
+  ],
+  "author": "Amar Tupo<amar@practical.at>",
+  "license": "MIT",
+  "types": "types/index.d.ts",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@verdaccio/types": "^10.8.0"
+  }
+}
