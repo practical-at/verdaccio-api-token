@@ -31,7 +31,6 @@ interface AuthPlugin {
         next: (err?: any) => void
     ) => Promise<void>;
 }
-
 export = function apiTokenAuth(
     config: ApiTokenAuthConfig,
     stuff: VerdaccioStuff
@@ -43,7 +42,9 @@ export = function apiTokenAuth(
     if (!endpoint) {
         logger.error('verdaccio-api-token: "endpoint" missing');
         return {
-            authenticate() {},
+            authenticate(user, password, cb) {
+                cb(null, false);
+            },
             apiJWTmiddleware() {
                 return async (_req, _res, next) => next();
             },
@@ -62,8 +63,6 @@ export = function apiTokenAuth(
                 signal: controller.signal,
             });
 
-            console.info("Response", res)
-
             if (!res.ok) {
                 logger.warn(`Token API responded ${res.status}`);
                 return null;
@@ -79,64 +78,88 @@ export = function apiTokenAuth(
         }
     }
 
+    function isJWT(value: string): boolean {
+        const jwtRegex = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+        return jwtRegex.test(value);
+    }
+
+    function isBasicAuth(value: string): boolean {
+        try {
+            const base64Regex = /^[A-Za-z0-9+/]+=*$/;
+            if (!base64Regex.test(value)) return false;
+
+            const decoded = Buffer.from(value, 'base64').toString('utf8');
+            return decoded.includes(':');
+        } catch {
+            return false;
+        }
+    }
+
     return {
-        // npm login
-        authenticate(user: string, token: string, cb: AuthCallback): void {
-            if (!token) return cb(null, false);
-
-            validateToken(token)
-                .then((data) => {
-                    if (!data) {
-                        logger.warn('Invalid token (login)');
-                        return cb(null, false);
-                    }
-
-                    const username = data.username || user || 'api-user';
-                    const groups = [username, ...data.groups!];
-
-                    logger.debug({ username, groups }, 'Login authenticated');
-                    cb(null, groups);
-                })
-                .catch(() => cb(null, false));
+        authenticate(user: string, password: string, cb: AuthCallback): void {
+            logger.debug({ user }, 'Passing login to Verdaccio');
+            cb(null, false);
         },
 
-        // Registry / API access
         apiJWTmiddleware() {
             return async (req: any, _res: any, next): Promise<void> => {
                 const auth = req.headers?.authorization;
-                if (!auth) return next();
 
+                // No auth header - let Verdaccio handle it (might be anonymous access)
+                if (!auth) {
+                    logger.debug('No authorization header, passing to Verdaccio');
+                    return next();
+                }
 
                 const token = auth.startsWith('Bearer ')
                     ? auth.slice(7)
                     : auth;
 
-                console.info("Auth:", auth)
-                console.info("Token:", token)
-
-
-                const data = await validateToken(token);
-
-
-                if (!data) {
-                    logger.warn('Invalid token (api)');
-                    const err = new Error('Unauthorized');
-                    (err as any).status = 401;
-                    return next(err);
+                // JWT (Web UI) - let Verdaccio's JWT middleware handle it
+                if (isJWT(token)) {
+                    logger.debug('JWT detected, passing to Verdaccio');
+                    return next();
                 }
 
-                const username = data.username || 'api-user';
-                const groups = data.groups!;
+                // Basic Auth (npm login with htpasswd) - let Verdaccio handle it
+                if (isBasicAuth(token)) {
+                    logger.debug('Basic Auth token detected, passing to Verdaccio');
+                    return next();
+                }
 
-                req.remote_user = {
-                    name: username,
-                    groups,
-                    real_groups: [username, ...groups],
-                } as RemoteUser;
+                // Custom API token - validate it
+                logger.debug('Custom token detected, validating via API');
 
-                logger.debug({ username, groups }, 'API authenticated');
-                next();
+                try {
+                    const data = await validateToken(token);
+
+                    if (!data) {
+                        logger.warn('Invalid API token');
+                        const err = new Error('Unauthorized');
+                        (err as any).status = 401;
+                        return next(err);
+                    }
+
+                    const username = data.username || 'api-user';
+                    const groups = data.groups!;
+
+                    // Set remote_user for Verdaccio's authorization
+                    req.remote_user = {
+                        name: username,
+                        groups,
+                        real_groups: [username, ...groups],
+                    } as RemoteUser;
+
+                    logger.info({ username, groups }, 'API authenticated via custom token');
+                    next();
+                } catch (err: any) {
+                    logger.error({ err: err.message }, 'Token validation error');
+                    const error = new Error('Unauthorized');
+                    (error as any).status = 401;
+                    return next(error);
+                }
             };
         },
     };
 };
+
