@@ -3,16 +3,19 @@
 [![npm version](https://img.shields.io/npm/v/@practical/verdaccio-api-token.svg)](https://www.npmjs.com/package/@practical/verdaccio-api-token)
 
 Minimal Verdaccio Auth Plugin that validates non JWT `_authToken` against an external API endpoint.
-Can be used with Verdaccios alongside with npm login & JWT for web UI.
+⚠️ **not htpasswd compatible **: as we override `apiJWTmiddleware` you can not npm login/adduser
+to publish tokens u will need an authtoken with according rights. 
+however if you initially set up via `npm adduser` and add your token u can still login to the web UI.
 
 ## Features
 
 - ✅ Only 2 config options: `endpoint`, `timeout`
 - ✅ Native `fetch()` (Node.js 18+)
 - ✅ Timeout & Error Handling
-- ✅ **htpasswd Compatible**: Enables simultaneous `npm login` with username/password
-- ✅ **JWT Support**: Web UI login works unchanged
+- ✅ **JWT Support**: Web UI login works unchanged if you have added users via npm adduser
 - ✅ Allowed groups dynamically from API response
+
+
 
 ## Setup
 
