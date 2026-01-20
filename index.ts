@@ -17,6 +17,7 @@ interface ApiResponse {
 }
 
 type AuthCallback = (err: Error | null, groups?: string[] | false) => void;
+type AllowCallback = (err: Error | null, allowed?: boolean) => void;
 
 interface RemoteUser {
     name: string;
@@ -24,14 +25,28 @@ interface RemoteUser {
     real_groups: string[];
 }
 
+interface PackageAccess {
+    name: string;
+    publish?: string[] | string;
+    unpublish?: string[] | string;
+    [key: string]: any;
+}
+
 interface AuthPlugin {
     authenticate(user: string, password: string, cb: AuthCallback): void;
     add_user(user: string, password: string, cb: AuthCallback): void;
+    allow_publish(user: RemoteUser, pkg: PackageAccess, cb: AllowCallback): void;
+    allow_unpublish(user: RemoteUser, pkg: PackageAccess, cb: AllowCallback): void;
     apiJWTmiddleware(): (
         req: any,
         res: any,
         next: (err?: any) => void
     ) => Promise<void>;
+}
+
+interface CachedUser {
+    username: string;
+    groups: string[];
 }
 
 export = function apiTokenAuth(
@@ -43,6 +58,10 @@ export = function apiTokenAuth(
     const signupUrl = config.signupUrl || 'your signup page';
     const timeout = config.timeout ?? 5000;
 
+    // Cache validated tokens with their user data for performance
+    // Tokens are removed from cache when validation fails on subsequent requests
+    const validatedTokens = new Map<string, CachedUser>();
+
     if (!endpoint) {
         logger.error('verdaccio-api-token: "endpoint" missing');
         return {
@@ -52,12 +71,23 @@ export = function apiTokenAuth(
             add_user(user, password, cb) {
                 cb(null, false);
             },
+            allow_publish(user, pkg, cb) {
+                cb(null, false);
+            },
+            allow_unpublish(user, pkg, cb) {
+                cb(null, false);
+            },
             apiJWTmiddleware() {
                 return async (_req, _res, next) => next();
             },
         };
     }
 
+    /**
+     * Validates a token by calling the configured API endpoint
+     * @param token - The token to validate
+     * @returns ApiResponse if valid, null if invalid or error occurred
+     */
     async function validateToken(token: string): Promise<ApiResponse | null> {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeout);
@@ -102,7 +132,6 @@ export = function apiTokenAuth(
                 url: res.url
             }, 'Fetch completed - connection established');
 
-            // Log all response headers
             const headers: Record<string, string> = {};
             res.headers.forEach((value, key) => {
                 headers[key] = value;
@@ -255,11 +284,17 @@ export = function apiTokenAuth(
         }
     }
 
+    /**
+     * Checks if a value is a JWT token (3 base64url-encoded parts separated by dots)
+     */
     function isJWT(value: string): boolean {
         const jwtRegex = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
         return jwtRegex.test(value);
     }
 
+    /**
+     * Checks if a value is a Basic Auth token (base64-encoded username:password)
+     */
     function isBasicAuth(value: string): boolean {
         try {
             const base64Regex = /^[A-Za-z0-9+/]+=*$/;
@@ -272,6 +307,9 @@ export = function apiTokenAuth(
     }
 
     return {
+        /**
+         * Authenticate is not implemented - users must sign up via external service
+         */
         authenticate(user: string, password: string, cb: AuthCallback): void {
             logger.info({ user }, 'authenticate() called - rejecting with signup URL');
             const err = new Error(`Signup/Login Not Implemented please use ${signupUrl} to signup`);
@@ -279,6 +317,9 @@ export = function apiTokenAuth(
             cb(err, false);
         },
 
+        /**
+         * Add user is not implemented - users must sign up via external service
+         */
         add_user(user: string, password: string, cb: AuthCallback): void {
             logger.info({ user }, 'add_user() called - rejecting with signup URL');
             const err = new Error(`Signup/Login Not Implemented please use ${signupUrl} to signup`);
@@ -286,6 +327,111 @@ export = function apiTokenAuth(
             cb(err, false);
         },
 
+        /**
+         * Checks if a user is allowed to publish a package
+         * Enforces group-based access control from config.yaml
+         */
+        allow_publish(user: RemoteUser, pkg: PackageAccess, cb: AllowCallback): void {
+            logger.debug({
+                user: user?.name,
+                userGroups: user?.groups,
+                package: pkg?.name,
+                packagePublish: pkg.publish
+            }, 'allow_publish check');
+
+            // No user = no access
+            if (!user?.name || !user?.groups?.length) {
+                logger.warn({ user: user?.name, package: pkg?.name }, 'Publish denied - no valid user');
+                return cb(null, false);
+            }
+
+            // Get publish rules from package configuration
+            const publishGroups = pkg.publish;
+
+            // If no publish rules defined, allow it
+            if (!publishGroups || publishGroups.length === 0) {
+                logger.info({ user: user.name, package: pkg.name }, 'Publish allowed - no restrictions');
+                return cb(null, true);
+            }
+
+            // Check if user is in one of the allowed groups
+            const allowedGroups = Array.isArray(publishGroups) ? publishGroups : publishGroups.split(/\s+/);
+            const hasAccess = user.groups.some(group => allowedGroups.includes(group));
+
+            if (hasAccess) {
+                logger.info({
+                    user: user.name,
+                    package: pkg.name,
+                    matchedGroups: user.groups.filter(g => allowedGroups.includes(g))
+                }, 'Publish allowed');
+                return cb(null, true);
+            }
+
+            logger.warn({
+                user: user?.name,
+                userGroups: user.groups,
+                requiredGroups: allowedGroups,
+                package: pkg?.name
+            }, 'Publish denied - user not in required groups');
+            cb(null, false);
+        },
+
+        /**
+         * Checks if a user is allowed to unpublish a package
+         * Enforces group-based access control from config.yaml
+         */
+        allow_unpublish(user: RemoteUser, pkg: PackageAccess, cb: AllowCallback): void {
+            logger.debug({
+                user: user?.name,
+                userGroups: user?.groups,
+                package: pkg?.name,
+                packageUnpublish: pkg.unpublish
+            }, 'allow_unpublish check');
+
+            // No user = no access
+            if (!user?.name || !user?.groups?.length) {
+                logger.warn({ user: user?.name, package: pkg?.name }, 'Unpublish denied - no valid user');
+                return cb(null, false);
+            }
+
+            // Get unpublish rules from package configuration
+            const unpublishGroups = pkg.unpublish;
+
+            // If no unpublish rules defined, allow it
+            if (!unpublishGroups || unpublishGroups.length === 0) {
+                logger.info({ user: user.name, package: pkg.name }, 'Unpublish allowed - no restrictions');
+                return cb(null, true);
+            }
+
+            // Check if user is in one of the allowed groups
+            const allowedGroups = Array.isArray(unpublishGroups) ? unpublishGroups : unpublishGroups.split(/\s+/);
+            const hasAccess = user.groups.some(group => allowedGroups.includes(group));
+
+            if (hasAccess) {
+                logger.info({
+                    user: user.name,
+                    package: pkg.name,
+                    matchedGroups: user.groups.filter(g => allowedGroups.includes(g))
+                }, 'Unpublish allowed');
+                return cb(null, true);
+            }
+
+            logger.warn({
+                user: user?.name,
+                userGroups: user.groups,
+                requiredGroups: allowedGroups,
+                package: pkg?.name
+            }, 'Unpublish denied - user not in required groups');
+            cb(null, false);
+        },
+
+        /**
+         * Middleware that intercepts requests to authenticate via custom API tokens
+         * - JWT tokens are passed through to Verdaccio's default handler
+         * - Basic Auth tokens are passed through to Verdaccio's default handler
+         * - Custom API tokens are validated via the configured endpoint
+         * - Validated tokens are cached for performance (removed on validation failure)
+         */
         apiJWTmiddleware() {
             return async (req: any, _res: any, next): Promise<void> => {
                 const auth = req.headers?.authorization;
@@ -308,6 +454,7 @@ export = function apiTokenAuth(
                     tokenPrefix: token.substring(0, 8) + '...'
                 }, 'Authorization header present');
 
+                // Let Verdaccio handle JWT tokens
                 if (isJWT(token)) {
                     logger.debug({
                         tokenPrefix: token.substring(0, 20) + '...'
@@ -315,8 +462,25 @@ export = function apiTokenAuth(
                     return next();
                 }
 
+                // Let Verdaccio handle Basic Auth
                 if (isBasicAuth(token)) {
                     logger.debug('Basic Auth token detected - passing to Verdaccio');
+                    return next();
+                }
+
+                // Check if token is cached with user data
+                const cachedUser = validatedTokens.get(token);
+                if (cachedUser) {
+                    logger.debug({
+                        username: cachedUser.username,
+                        groups: cachedUser.groups
+                    }, 'Token previously validated - using cached user');
+
+                    req.remote_user = {
+                        name: cachedUser.username,
+                        groups: cachedUser.groups,
+                        real_groups: [cachedUser.username, ...cachedUser.groups],
+                    };
                     return next();
                 }
 
@@ -333,13 +497,20 @@ export = function apiTokenAuth(
                         logger.warn({
                             tokenPrefix: token.substring(0, 8) + '...'
                         }, 'Invalid API token - validation returned null');
+
+                        // Remove token from cache if it was previously valid but now invalid
+                        validatedTokens.delete(token);
+
                         const err = new Error('Unauthorized');
                         (err as any).status = 401;
                         return next(err);
                     }
 
-                    const username = 'api-user';
+                    const username = data.username || 'api-user';
                     const groups = data.groups!;
+
+                    // Store user data in cache for future requests
+                    validatedTokens.set(token, { username, groups });
 
                     req.remote_user = {
                         name: username,
@@ -350,7 +521,8 @@ export = function apiTokenAuth(
                     logger.info({
                         username,
                         groups,
-                        path: req.path
+                        path: req.path,
+                        source: 'api'
                     }, '✓ API authenticated via custom token');
 
                     next();
@@ -361,6 +533,10 @@ export = function apiTokenAuth(
                         errStack: err.stack,
                         path: req.path
                     }, 'Token validation error in middleware');
+
+                    // Remove token from cache on validation error
+                    validatedTokens.delete(token);
+
                     const error = new Error('Unauthorized');
                     (error as any).status = 401;
                     return next(error);

@@ -16,7 +16,6 @@ however if you initially set up via `npm adduser` and add your token u can still
 - ✅ Allowed groups dynamically from API response
 
 
-
 ## Setup
 
 ```bash
@@ -34,14 +33,12 @@ npm i @practical/verdaccio-api-token
 plugins: ./plugins/node_modules # optional
 
 
-# !!! Important: Place the plugin before htpasswd so custom tokens are checked first
+
 auth:
   '@practical/verdaccio-api-token':
-    endpoint: https://your-api.com/verdaccio/verify  # Required
+    endpoint: https://your-api.com/verdaccio/verify  # Required 
     timeout: 5000  # Optional (ms)
-  htpasswd:
-    file: ./htpasswd
-    max_users: -1
+    signupUrl: your signup page  # Optional 
 
 # set your auth config as u like
 packages:
